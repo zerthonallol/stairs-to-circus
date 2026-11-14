@@ -24,7 +24,7 @@ const profile = (pts: [number, number][]) => {
 export function buildCar(lite: boolean, color = "#3f6a62"): CarModel {
   const M = (p: THREE.MeshStandardMaterialParameters) =>
     lite
-      ? (new THREE.MeshLambertMaterial({ color: p.color, transparent: p.transparent, opacity: p.opacity ?? 1, side: p.side }) as unknown as THREE.MeshStandardMaterial)
+      ? (new THREE.MeshLambertMaterial({ color: p.color ?? "#ffffff", transparent: p.transparent ?? false, opacity: p.opacity ?? 1, side: p.side ?? THREE.FrontSide }) as unknown as THREE.MeshStandardMaterial)
       : new THREE.MeshStandardMaterial(p);
   const paint = M({ color, metalness: 0.6, roughness: 0.28 });
   const chrome = M({ color: "#b9c0c2", metalness: 0.9, roughness: 0.2 });
