@@ -1,5 +1,5 @@
 # Remaining game work
-- [ ] Extend prologue: seventh-floor landing, elevator, street, car ignition; fix wall rug; verify departure gates and rendering.
+- [ ] Fix held-key walking and seamless floor-by-floor stair descent; enrich the hall and elevator; animate driving away before the pictured intro; verify the full departure flow.
 - [ ] Image touch controls and inventory
 - [ ] Landscape lock with browser fallback
 - [ ] Bear skins and visible model verification

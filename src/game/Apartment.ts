@@ -10,17 +10,17 @@ import tileUrl from "@/assets/apartment/tile.jpg";
 import rugUrl from "@/assets/apartment/rug.jpg";
 import viewUrl from "@/assets/apartment/window-view.jpg";
 import photoUrl from "@/assets/apartment/photo.jpg";
-import { departureNext, canBeginMainGame, nextFloor, START_FLOOR, type DepartureStage, type DepartureAction } from "./departure-rules";
+import { departureNext, canBeginMainGame, stairLap, START_FLOOR, STAIR_HEIGHT, type DepartureStage, type DepartureAction } from "./departure-rules";
+import { movementDistance, normalizeMovement, PROLOGUE_STEP } from "./locomotion";
 import { buildCar, setCarLights, type CarModel } from "./carModel";
 
-export interface AptHud { prompt: string; objective: string; subtitle: string; paused: boolean; flashlight: boolean }
+export interface AptHud { prompt: string; objective: string; subtitle: string; paused: boolean; flashlight: boolean; fade: number }
 export interface AptCallbacks { onHud: (h: AptHud) => void; onProgress: (p: number) => void; onReady: () => void; onDone: () => void }
 
 type Box = [number, number, number, number]; // minX, minZ, maxX, maxZ
 interface Spot { id: string; pos: THREE.Vector3; label: () => string; ok: () => boolean; use: () => void }
 
-const H = 2.7, T = 0.12, EYE = 1.65, R = 0.28;
-const WALK = 1.9, RUN = 3.2;
+const H = STAIR_HEIGHT, T = 0.12, EYE = 1.65, R = 0.28;
 
 function canvasTex(w: number, h: number, draw: (g: CanvasRenderingContext2D) => void, repeat = true) {
   const c = document.createElement("canvas");
@@ -55,6 +55,23 @@ const fabricTex = (base: string) => canvasTex(256, 256, (g) => {
 const plasterTex = () => canvasTex(256, 256, (g) => {
   g.fillStyle = "#d9d4c8"; g.fillRect(0, 0, 256, 256);
   for (let i = 0; i < 4000; i++) { g.fillStyle = `rgba(80,70,50,${Math.random() * 0.06})`; g.fillRect(Math.random() * 256, Math.random() * 256, 2, 2); }
+});
+const brushedTex = () => canvasTex(512, 512, (g) => {
+  g.fillStyle = "#9aa09d"; g.fillRect(0, 0, 512, 512);
+  for (let i = 0; i < 1800; i++) {
+    const shade = 80 + Math.floor(Math.random() * 130);
+    g.strokeStyle = `rgba(${shade},${shade},${shade},${0.025 + Math.random() * 0.07})`;
+    g.lineWidth = Math.random() < 0.95 ? 1 : 2;
+    const x = Math.random() * 512, y = Math.random() * 512;
+    g.beginPath(); g.moveTo(x, y); g.lineTo(x + Math.random() * 2 - 1, y + 20 + Math.random() * 180); g.stroke();
+  }
+  for (let i = 0; i < 22; i++) {
+    g.strokeStyle = "rgba(45,50,48,0.18)"; g.lineWidth = 1;
+    const x = Math.random() * 512, y = Math.random() * 512;
+    g.beginPath(); g.moveTo(x, y); g.lineTo(x + 20 + Math.random() * 70, y + Math.random() * 9 - 4); g.stroke();
+  }
+  const grime = g.createLinearGradient(0, 350, 0, 512); grime.addColorStop(0, "rgba(30,35,32,0)"); grime.addColorStop(1, "rgba(30,35,32,0.28)");
+  g.fillStyle = grime; g.fillRect(0, 350, 512, 162);
 });
 const linoTex = () => canvasTex(512, 512, (g) => {
   for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
@@ -136,6 +153,9 @@ export class Apartment {
   private car!: CarModel;
   private seatEye = new THREE.Vector3();
   private engine: OscillatorNode | null = null;
+  private accumulator = 0;
+  private fade = 0;
+  private driveDistance = 0;
 
   constructor(private container: HTMLElement, private cb: AptCallbacks, private lang: Lang) {
     this.isTouch = window.matchMedia("(pointer: coarse)").matches;
@@ -493,10 +513,11 @@ export class Apartment {
     });
   }
 
-  private sign(text: string, x: number, y: number, z: number, width = 0.5, height = 0.3, rotation = 0, parent: THREE.Object3D = this.scene) {
+  private sign(text: string, x: number, y: number, z: number, width = 0.5, height = 0.3, rotation = 0, parent: THREE.Object3D = this.scene, fg = "#dbe6d2", bg = "#182421") {
     const texture = canvasTex(256, 128, (g) => {
-      g.fillStyle = "#182421"; g.fillRect(0, 0, 256, 128);
-      g.fillStyle = "#dbe6d2"; g.font = "bold 64px monospace"; g.textAlign = "center"; g.textBaseline = "middle";
+      g.fillStyle = bg; g.fillRect(0, 0, 256, 128);
+      const size = text.length > 13 ? 27 : text.length > 9 ? 38 : 64;
+      g.fillStyle = fg; g.font = `bold ${size}px monospace`; g.textAlign = "center"; g.textBaseline = "middle";
       g.fillText(text, 128, 64);
     }, false);
     const mesh = new THREE.Mesh(new THREE.PlaneGeometry(width, height), new THREE.MeshBasicMaterial({ map: texture }));
@@ -509,6 +530,101 @@ export class Apartment {
     g.fillStyle = bg; g.fillRect(0, 0, 256, 128);
     g.fillStyle = fg; g.font = "bold 64px monospace"; g.textAlign = "center"; g.textBaseline = "middle"; g.fillText(text, 128, 64);
     texture.needsUpdate = true;
+  }
+
+  private buildLift(metal: THREE.Material, dark: THREE.Material) {
+    const trim = this.mat({ map: brushedTex(), color: "#737c79", metalness: 0.72, roughness: 0.42 });
+    const leaves = this.mat({ map: brushedTex(), color: "#b0b5b1", metalness: 0.68, roughness: 0.36 });
+    const recess = this.mat({ color: "#111615", roughness: 0.95 });
+    const header = this.mat({ map: plasterTex(), color: "#b5b8ac", roughness: 0.95 });
+    // Close the wall above the portal; the broken lift is a shaft, not an opening to the sky.
+    this.box(1.6, H - 2.22, 0.14, header, 12.8, 2.22, 3);
+    // Deep portal, separate brushed-steel leaves, gaskets and a worn threshold.
+    this.box(1.82, 2.22, 0.1, recess, 12.8, 0, 3.015);
+    for (const x of [12.405, 13.195]) {
+      const leaf = this.box(0.775, 2.02, 0.055, leaves, x, 0.025, 3.085);
+      this.liftDoors.push(leaf);
+      this.box(0.018, 1.96, 0.012, trim, x + (x < 12.8 ? 0.31 : -0.31), 0.055, 3.12);
+    }
+    this.box(0.026, 2.03, 0.018, dark, 12.8, 0.02, 3.122);
+    for (const x of [11.94, 13.66]) this.box(0.13, 2.24, 0.16, trim, x, 0, 3.07);
+    this.box(1.84, 0.15, 0.16, trim, 12.8, 2.08, 3.07);
+    this.box(1.72, 0.035, 0.34, trim, 12.8, 0, 3.15);
+    for (const x of [11.97, 13.63]) for (const y of [0.22, 1.95]) {
+      const rivet = this.cyl(0.014, 0.014, 0.012, metal, x, y, 3.16, 8); rivet.rotation.x = Math.PI / 2;
+    }
+    this.sign(this.l("ЛИФТ", "LIFT"), 12.8, 2.5, 3.09, 0.72, 0.18);
+    this.liftDisplay = this.sign("--", 12.8, 2.27, 3.16, 0.36, 0.18, 0, this.scene, "#d7a75d", "#111615");
+    const note = canvasTex(256, 192, (g) => {
+      g.fillStyle = "#efe9d6"; g.fillRect(0, 0, 256, 192);
+      g.strokeStyle = "rgba(70,60,40,0.25)"; g.strokeRect(5, 5, 246, 182);
+      g.fillStyle = "#1d2a6b"; g.font = "bold 34px serif"; g.textAlign = "center";
+      g.fillText(this.l("ЛИФТ НЕ", "LIFT OUT"), 128, 70); g.fillText(this.l("РАБОТАЕТ", "OF ORDER"), 128, 112);
+      g.font = "20px serif"; g.fillText(this.l("ЖЭК №4", "Housing office"), 128, 160);
+    }, false);
+    const noteMesh = new THREE.Mesh(new THREE.PlaneGeometry(0.42, 0.32), new THREE.MeshBasicMaterial({ map: note, color: "#d4cfbd" }));
+    noteMesh.position.set(12.92, 1.43, 3.127); noteMesh.rotation.z = 0.06; this.scene.add(noteMesh);
+    const tape = this.mat({ color: "#b9a86d", roughness: 1 });
+    const strip = this.box(0.18, 0.035, 0.008, tape, 12.92, 1.59, 3.134); strip.rotation.z = -0.08;
+    // Call station: metal plate, both arrows and a dead black button.
+    this.box(0.16, 0.34, 0.055, trim, 13.88, 1.14, 3.095);
+    this.sign("▲  ▼", 13.88, 1.39, 3.126, 0.12, 0.09, 0, this.scene, "#222927", "#a1a7a2");
+    this.cyl(0.038, 0.038, 0.025, dark, 13.88, 1.245, 3.135, 16).rotation.x = Math.PI / 2;
+    this.spot("liftCall", new THREE.Vector3(13.88, 1.32, 3.14), () => this.l("Вызвать лифт", "Call the elevator"), () => this.departure === "landing" || this.departure === "ground", () => {
+      this.sfx.click();
+      this.caption("Тишина. Лифт опять сломан — придётся пешком по лестнице.", "Nothing. The lift is broken again — I'll have to take the stairs.");
+    });
+  }
+
+  private buildHallDetails(metal: THREE.Material, dark: THREE.Material) {
+    const pale = this.mat({ color: "#c7c4b5", roughness: 0.82 });
+    const pipeMat = this.mat({ color: "#8b9088", metalness: 0.45, roughness: 0.55 });
+    const red = this.mat({ color: "#6f211b", roughness: 0.65 });
+    // A real two-column mailbox cabinet with slots and apartment labels.
+    this.box(0.2, 1.0, 1.16, dark, 9.16, 0.72, 5.72);
+    for (let row = 0; row < 4; row++) for (let col = 0; col < 2; col++) {
+      const z = 5.43 + col * 0.56, y = 0.79 + row * 0.22;
+      this.box(0.035, 0.2, 0.52, metal, 9.275, y, z);
+      this.box(0.012, 0.025, 0.3, dark, 9.298, y + 0.125, z);
+      this.sign(String(25 + row * 2 + col), 9.302, y + 0.055, z, 0.1, 0.06, Math.PI / 2);
+    }
+    // Cast-iron radiator and supply pipes on the wall opposite the mailboxes.
+    for (let i = 0; i < 9; i++) this.box(0.075, 0.58, 0.13, pale, 9.72 + i * 0.105, 0.28, 3.19);
+    for (const y of [0.38, 0.75]) this.box(1.0, 0.055, 0.08, pale, 10.14, y, 3.19);
+    for (const x of [9.63, 10.67]) this.cyl(0.022, 0.022, 0.3, pipeMat, x, 0, 3.18, 10);
+    const horizontal = this.cyl(0.026, 0.026, 6.4, pipeMat, 0, 0, 0, 10);
+    horizontal.rotation.z = Math.PI / 2; horizontal.position.set(12.45, 2.43, 7.74);
+    this.cyl(0.032, 0.032, 2.5, pipeMat, 15.68, 0, 3.38, 10);
+    for (const y of [0.35, 1.45, 2.3]) this.box(0.12, 0.035, 0.12, dark, 15.68, y, 3.38);
+    // Housing notices and a cracked patch of old plaster.
+    this.sign(this.l("НЕ КУРИТЬ", "NO SMOKING"), 11.25, 1.72, 3.085, 0.7, 0.26, 0, this.scene, "#53251f", "#d7d0b8");
+    this.sign(this.l("ОБЪЯВЛЕНИЕ", "NOTICE"), 9.085, 1.65, 4.35, 0.62, 0.3, Math.PI / 2, this.scene, "#2c3c37", "#d5d0bb");
+    const cracks = canvasTex(256, 256, (g) => {
+      g.clearRect(0, 0, 256, 256); g.strokeStyle = "rgba(45,48,42,0.5)"; g.lineWidth = 2;
+      for (let i = 0; i < 7; i++) {
+        let x = 130 + Math.random() * 30 - 15, y = 20; g.beginPath(); g.moveTo(x, y);
+        for (let j = 0; j < 7; j++) { x += Math.random() * 36 - 18; y += 20 + Math.random() * 18; g.lineTo(x, y); } g.stroke();
+      }
+    }, false);
+    const crack = new THREE.Mesh(new THREE.PlaneGeometry(0.65, 1.0), new THREE.MeshBasicMaterial({ map: cracks, transparent: true, depthWrite: false }));
+    crack.position.set(14.65, 1.45, 3.081); this.scene.add(crack);
+    // Intercom and fire extinguisher beside the ground-floor exit.
+    this.box(0.09, 0.36, 0.22, pale, 15.84, 1.18, 6.9);
+    for (let i = 0; i < 4; i++) this.box(0.012, 0.014, 0.11, dark, 15.785, 1.4 - i * 0.035, 6.9);
+    this.box(0.02, 0.07, 0.07, dark, 15.78, 1.23, 6.9);
+    this.cyl(0.1, 0.11, 0.52, red, 15.62, 0.45, 4.05, 14);
+    this.box(0.12, 0.06, 0.08, dark, 15.62, 0.98, 4.05);
+    this.sign(this.l("ОГНЕТУШИТЕЛЬ", "FIRE EXTINGUISHER"), 15.89, 1.35, 4.05, 0.62, 0.16, -Math.PI / 2, this.scene, "#e5d8c4", "#6f211b");
+    // Cage around the ceiling lamp; no extra dynamic light is needed.
+    for (const x of [11.9, 12.9]) this.box(0.025, 0.18, 0.24, dark, x, 2.5, 5.5);
+    for (const z of [5.39, 5.61]) this.box(1.04, 0.18, 0.025, dark, 12.4, 2.5, z);
+    // Damp footprints leading from the stair door towards the lift.
+    const footprint = new THREE.MeshBasicMaterial({ color: "#29312f", transparent: true, opacity: 0.32, depthWrite: false });
+    for (let i = 0; i < 7; i++) {
+      const foot = new THREE.Mesh(new THREE.CircleGeometry(0.085, 12), footprint);
+      foot.scale.set(0.55, 1, 1); foot.rotation.x = -Math.PI / 2; foot.rotation.z = (i % 2 ? 0.18 : -0.18);
+      foot.position.set(10.45 + i * 0.31, 0.006, 7.35 - i * 0.47 + (i % 2 ? 0.12 : -0.12)); this.scene.add(foot);
+    }
   }
 
   private buildDeparture() {
@@ -535,32 +651,21 @@ export class Apartment {
     wall(0.46, 0.14, 9.37, 8); wall(5.2, 0.14, 13.4, 8);
     this.box(1.2, H - 2.1, 0.14, plaster, 10.2, 2.1, 8);
     this.floorDisplay = this.sign("7", 10.2, 2.35, 7.92, 0.36, 0.24, Math.PI);
-    this.sign(this.l("ЛИФТ", "LIFT"), 12.8, 2.46, 3.1, 0.8, 0.22);
-    this.liftDisplay = this.sign("--", 12.8, 2.15, 3.11, 0.32, 0.22);
-    // broken lift: closed doors with a handwritten note
-    for (const x of [12.4, 13.2]) this.liftDoors.push(this.box(0.8, 2.05, 0.06, metal, x, 0, 3));
-    const note = canvasTex(256, 192, (g) => {
-      g.fillStyle = "#efe9d6"; g.fillRect(0, 0, 256, 192);
-      g.fillStyle = "#1d2a6b"; g.font = "bold 34px serif"; g.textAlign = "center";
-      g.fillText(this.l("ЛИФТ НЕ", "LIFT OUT"), 128, 70); g.fillText(this.l("РАБОТАЕТ", "OF ORDER"), 128, 112);
-      g.font = "20px serif"; g.fillText(this.l("ЖЭК №4", "Housing office"), 128, 160);
-    }, false);
-    const noteMesh = new THREE.Mesh(new THREE.PlaneGeometry(0.42, 0.32), new THREE.MeshBasicMaterial({ map: note, color: "#b9b4a4" }));
-    noteMesh.position.set(12.85, 1.45, 3.04); noteMesh.rotation.z = 0.06; this.scene.add(noteMesh);
-    this.box(0.12, 0.24, 0.04, metal, 13.86, 1.2, 3.1);
-    this.box(0.055, 0.055, 0.02, dark, 13.86, 1.28, 3.14);
-    this.spot("liftCall", new THREE.Vector3(13.86, 1.32, 3.14), () => this.l("Вызвать лифт", "Call the elevator"), () => this.departure === "landing" || this.departure === "ground", () => {
-      this.sfx.click();
-      this.caption("Тишина. Лифт опять сломан — придётся пешком по лестнице.", "Nothing. The lift is broken again — I'll have to take the stairs.");
-    });
-    // neighbours' doors, meter cabinet, mailboxes
+    this.buildLift(metal, dark);
+    // Neighbours' panelled doors, architraves, peepholes, handles and coir mats.
     for (const [x, n] of [[12.6, "27"], [14.8, "28"]] as const) {
       this.box(1, 2.12, 0.08, door, x, 0, 7.88);
-      this.sign(n, x, 1.8, 7.83, 0.22, 0.15, Math.PI);
-      this.box(0.12, 0.03, 0.05, metal, x + 0.32, 1, 7.82);
+      for (const dx of [-0.55, 0.55]) this.box(0.09, 2.22, 0.12, door, x + dx, 0, 7.86);
+      this.box(1.19, 0.09, 0.12, door, x, 2.13, 7.86);
+      this.box(0.78, 0.58, 0.025, dark, x, 1.3, 7.825);
+      this.box(0.78, 0.58, 0.025, dark, x, 0.3, 7.825);
+      this.sign(n, x, 1.93, 7.81, 0.22, 0.15, Math.PI);
+      this.box(0.12, 0.03, 0.06, metal, x + 0.32, 1, 7.8);
+      this.cyl(0.018, 0.018, 0.025, metal, x, 1.61, 7.8, 10).rotation.x = Math.PI / 2;
+      this.box(1.04, 0.018, 0.48, this.mat({ map: fabricTex("#30291f"), roughness: 1 }), x, 0, 7.48);
     }
     this.box(0.7, 0.8, 0.14, metal, 15.1, 1.1, 3.1);
-    for (let i = 0; i < 6; i++) this.box(0.16, 0.22, 0.48, metal, 9.12, 0.7 + i * 0.23, 6.5);
+    this.buildHallDetails(metal, dark);
     this.box(1.2, 0.04, 0.2, lamp, 12.4, 2.6, 5.5);
     const light = new THREE.PointLight("#d5eac7", this.isTouch ? 2.5 : 5, 9, 1.6);
     light.position.set(12.4, 2.5, 5.2); this.scene.add(light);
@@ -747,8 +852,9 @@ export class Apartment {
     this.boxes.push([16.75, 0.7, 17.25, 3.05]);
     // a neighbour's parked car up the street and the player's car under the lamp
     const other = buildCar(lite, "#6b2a24");
-    other.group.position.set(21.2, -0.15, -4.2); st.add(other.group);
-    this.boxes.push([21.2 - other.half[0], -4.2 - other.half[1], 21.2 + other.half[0], -4.2 + other.half[1]]);
+    // Opposite lane: the animated pull-away never intersects this parked car.
+    other.group.position.set(26.35, -0.15, -4.2); st.add(other.group);
+    this.boxes.push([26.35 - other.half[0], -4.2 - other.half[1], 26.35 + other.half[0], -4.2 + other.half[1]]);
     this.buildCar(st);
     this.streetRain = createRain(lite ? 1400 : 3600, 18, 12);
     this.streetRain.uniforms.uCenter.value.set(22, 2, 5);
@@ -774,14 +880,19 @@ export class Apartment {
   }
 
   private changeFloor(dir: -1 | 1) {
-    const f = nextFloor(this.floor, dir);
-    if (f === this.floor) return;
-    this.floor = f; this.updateFloorSigns(); this.sfx.creak(0.05);
+    const lap = stairLap(this.floor, dir);
+    if (!lap) return false;
+    this.floor = lap.floor;
+    // Reuse the identical landing one storey above/below without a visible camera jump.
+    this.pos.y += lap.cameraYOffset;
+    this.updateFloorSigns(); this.sfx.creak(0.05);
+    const f = this.floor;
     if (f === 1 && this.departure === "stairs") {
       this.advanceDeparture("arrive");
       this.exitGroup.visible = true; this.exitFiller.visible = false;
       this.caption("Первый этаж. За дверью всё ещё льёт.", "First floor. It's still pouring outside.");
     } else if (dir < 0 && f === 4) this.caption("Четвёртый… На каждом этаже одна и та же лампочка мигает.", "Fourth… the same bulb flickers on every floor.");
+    return true;
   }
   private advanceDeparture(action: DepartureAction) {
     const next = departureNext(this.departure, action);
@@ -829,7 +940,7 @@ export class Apartment {
       ground: this.l("1 этаж · Выйти на улицу", "Floor 1 · Leave the building"),
       street: this.l("Подойти к своей машине у фонаря", "Reach your car under the streetlight"),
       car: this.l("Завести машину", "Start the car"),
-      starting: this.l("Двигатель запускается…", "Engine starting…"),
+      starting: this.l(this.departureTime < 1.65 ? "Двигатель запускается…" : "Отъезд от дома…", this.departureTime < 1.65 ? "Engine starting…" : "Driving away…"),
     };
     if (goals[this.departure]) return goals[this.departure];
     if (this.done.has("keys")) return this.l("Выйти из квартиры", "Leave the apartment");
@@ -859,8 +970,14 @@ export class Apartment {
   lock() { if (!this.isTouch) this.renderer.domElement.requestPointerLock?.(); void this.sfx.ctx.resume(); }
   toggleFlash() { if (this.done.has("keys")) { this.flashOn = !this.flashOn; this.sfx.click(); } }
   interact() { void this.sfx.ctx.resume(); if (this.focus) this.focus.use(); }
-  private onKeyDown = (e: KeyboardEvent) => { this.keys.add(e.code); if (e.code === "KeyE") this.interact(); if (e.code === "KeyF") this.toggleFlash(); };
+  private onKeyDown = (e: KeyboardEvent) => {
+    if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(e.code)) e.preventDefault();
+    this.keys.add(e.code);
+    if (!e.repeat && e.code === "KeyE") this.interact();
+    if (!e.repeat && e.code === "KeyF") this.toggleFlash();
+  };
   private onKeyUp = (e: KeyboardEvent) => this.keys.delete(e.code);
+  private onBlur = () => { this.keys.clear(); this.touch.mx = 0; this.touch.my = 0; this.touch.sprint = false; };
   private onMouseMove = (e: MouseEvent) => { if (document.pointerLockElement === this.renderer.domElement) this.look(e.movementX, e.movementY, 0.0022); };
   private onMouseDown = () => { if (this.isTouch) return; if (document.pointerLockElement !== this.renderer.domElement) this.lock(); else this.interact(); };
   private onResize = () => {
@@ -873,6 +990,7 @@ export class Apartment {
     window.addEventListener("mousemove", this.onMouseMove);
     this.renderer.domElement.addEventListener("mousedown", this.onMouseDown);
     window.addEventListener("resize", this.onResize);
+    window.addEventListener("blur", this.onBlur);
   }
   private look(dx: number, dy: number, k: number) {
     this.yaw -= dx * k;
@@ -897,39 +1015,50 @@ export class Apartment {
   private loop = () => {
     this.raf = requestAnimationFrame(this.loop);
     this.timer.update();
-    const dt = Math.min(this.timer.getDelta(), 0.05);
+    const frameDt = Math.min(this.timer.getDelta(), 0.1);
     const t = this.timer.getElapsed();
     const paused = !this.isTouch && document.pointerLockElement !== this.renderer.domElement;
-    if (dt > 0 && !paused) this.update(dt);
-    this.updateFx(dt, t);
+    if (!paused) {
+      // Fixed simulation steps keep held-key walking smooth at any render frame rate.
+      this.accumulator = Math.min(this.accumulator + frameDt, PROLOGUE_STEP * 6);
+      while (this.accumulator >= PROLOGUE_STEP) {
+        this.update(PROLOGUE_STEP);
+        this.accumulator -= PROLOGUE_STEP;
+      }
+    } else this.accumulator = 0;
+    this.updateFx(frameDt, t);
     this.renderer.render(this.scene, this.camera);
     if (!this.container.dataset["sceneReady"]) this.container.dataset["sceneReady"] = "1";
-    this.hudT -= dt;
+    this.hudT -= frameDt;
     if (this.hudT <= 0) {
       this.hudT = 0.1;
-      this.cb.onHud({ prompt: this.focus?.label() ?? "", objective: this.objective(), subtitle: this.subtitle, paused: paused && !this.finished, flashlight: this.flashOn });
+      this.cb.onHud({ prompt: this.focus?.label() ?? "", objective: this.objective(), subtitle: this.subtitle, paused: paused && !this.finished, flashlight: this.flashOn, fade: this.fade });
     }
   };
 
   private update(dt: number) {
-    if (this.touch.lookX || this.touch.lookY) { this.look(this.touch.lookX, this.touch.lookY, 0.006); this.touch.lookX = this.touch.lookY = 0; }
+    const seated = this.departure === "car" || this.departure === "starting";
+    if (!seated && (this.touch.lookX || this.touch.lookY)) { this.look(this.touch.lookX, this.touch.lookY, 0.006); this.touch.lookX = this.touch.lookY = 0; }
     const k = this.keys;
-    let mx = (k.has("KeyD") || k.has("ArrowRight") ? 1 : 0) - (k.has("KeyA") || k.has("ArrowLeft") ? 1 : 0) + this.touch.mx;
-    let my = (k.has("KeyW") || k.has("ArrowUp") ? 1 : 0) - (k.has("KeyS") || k.has("ArrowDown") ? 1 : 0) + this.touch.my;
+    const rawX = (k.has("KeyD") || k.has("ArrowRight") ? 1 : 0) - (k.has("KeyA") || k.has("ArrowLeft") ? 1 : 0) + this.touch.mx;
+    const rawY = (k.has("KeyW") || k.has("ArrowUp") ? 1 : 0) - (k.has("KeyS") || k.has("ArrowDown") ? 1 : 0) + this.touch.my;
+    const input = normalizeMovement({ right: rawX, forward: rawY });
+    const mx = input.right, my = input.forward;
     const len = Math.hypot(mx, my);
-    if (len > 1) { mx /= len; my /= len; }
-    const sp = (k.has("ShiftLeft") || this.touch.sprint ? RUN : WALK) * dt;
+    const sprint = k.has("ShiftLeft") || k.has("ShiftRight") || this.touch.sprint;
+    const sp = movementDistance(dt, sprint);
+    const oldX = this.pos.x, oldZ = this.pos.z;
     const fx = -Math.sin(this.yaw), fz = -Math.cos(this.yaw);
     const rx = Math.cos(this.yaw), rz = -Math.sin(this.yaw);
     const nx = this.pos.x + (fx * my + rx * mx) * sp, nz = this.pos.z + (fz * my + rz * mx) * sp;
     if (!this.blocked(nx, this.pos.z)) this.pos.x = nx;
-    const px = this.pos.x;
     if (!this.blocked(this.pos.x, nz)) this.pos.z = nz;
-    // lap the stairwell: crossing the bottom of the lower flight is one storey down (or up)
-    if (this.pos.z > 9.3 && this.pos.x < 16) {
-      if (px >= 11.2 && this.pos.x < 11.2) this.changeFloor(-1);
-      else if (px < 11.2 && this.pos.x >= 11.2) {
-        if (this.floor >= START_FLOOR) this.pos.x = px; else this.changeFloor(1);
+    // Each crossing wraps to the adjacent identical landing and changes exactly one floor.
+    if (!seated && this.pos.z > 9.3 && this.pos.x < 16) {
+      if (oldX >= 11.2 && this.pos.x < 11.2) {
+        if (!this.changeFloor(-1)) this.pos.x = oldX;
+      } else if (oldX < 11.2 && this.pos.x >= 11.2) {
+        if (!this.changeFloor(1)) this.pos.x = oldX;
       }
     }
     if (this.departure === "apartment" && this.done.has("door") && this.pos.x > 9.35) {
@@ -938,13 +1067,13 @@ export class Apartment {
     if (this.departure === "landing" && this.pos.z > 8.3) {
       this.advanceDeparture("enterStairs"); this.caption("Седьмой этаж. Пешком… Только бы свет не погас.", "Seventh floor. On foot… just don't let the lights go out.");
     }
-    const moving = len > 0.1 && !seated;
+    const moved = Math.hypot(this.pos.x - oldX, this.pos.z - oldZ) > 0.0001;
+    const moving = len > 0.1 && !seated && moved;
     if (moving) {
-      this.stepT -= dt * (sp / dt > WALK ? 1.5 : 1);
+      this.stepT -= dt * (sprint ? 1.5 : 1);
       if (this.stepT <= 0) { this.stepT = 0.5; this.sfx.step(0.5); if (Math.random() < 0.25) this.sfx.creak(0.06); }
     }
     const bob = moving ? Math.sin(performance.now() * 0.009) * 0.025 : 0;
-    const seated = this.departure === "car" || this.departure === "starting";
     if (seated) this.camera.position.copy(this.seatEye);
     else {
       const gy = this.groundY(this.pos.x, this.pos.z);
@@ -969,18 +1098,51 @@ export class Apartment {
     }
   }
 
+  /** Ignition, a gentle pull-away and an exterior chase shot, then fade into the pictured intro. */
+  private updateDrive(t: number) {
+    if (this.departure === "done") { this.fade = 1; return; }
+    if (this.departure !== "starting") { this.fade = 0; this.driveDistance = 0; return; }
+    const time = this.departureTime;
+    const smooth = (a: number, b: number, v: number) => {
+      const x = THREE.MathUtils.clamp((v - a) / (b - a), 0, 1);
+      return x * x * (3 - 2 * x);
+    };
+    const driveT = Math.max(0, time - 1.65);
+    const accelT = Math.min(driveT, 2);
+    this.driveDistance = 1.5 * accelT * accelT + Math.max(0, driveT - 2) * 6;
+    const speed = Math.min(6, driveT * 3);
+    const car = this.car;
+    car.group.position.z = 7.2 - this.driveDistance;
+    car.group.position.x = 21.2 + smooth(0, 4, driveT) * 0.55;
+    car.wheels.forEach((wheel) => { wheel.rotation.x = -this.driveDistance / 0.33; });
+    if (this.engine) this.engine.frequency.setTargetAtTime((time < 1.65 ? 27 + Math.sin(t * 32) * 7 : 52) + speed * 5, this.sfx.ctx.currentTime, 0.1);
+
+    // Begin in the driver's seat, then pull outside to show the car actually leaving.
+    const seat = car.group.localToWorld(car.driverEye.clone());
+    seat.y += Math.sin(t * 35) * 0.003 * (1 - smooth(1.2, 2.5, time));
+    const chase = new THREE.Vector3(car.group.position.x + 4.3, 2.35, car.group.position.z + 6.4);
+    this.camera.position.lerpVectors(seat, chase, smooth(1.15, 2.65, time));
+    this.camera.lookAt(car.group.position.x, 0.72, car.group.position.z - 2.1);
+    this.streetRain.uniforms.uCenter.value.set(car.group.position.x, 2, car.group.position.z - 3);
+    this.fade = smooth(8.05, 9.25, time);
+    if (time > 1.8 && !this.done.has("driveAway")) {
+      this.done.add("driveAway");
+      this.caption("Машина тронулась. Седьмой этаж остался позади.", "The car pulls away. The seventh floor is behind me.");
+    }
+    if (time > 6.2 && !this.done.has("driveRoad")) {
+      this.done.add("driveRoad");
+      this.caption("Двор исчез в зеркале. Теперь только дорога и дождь.", "The courtyard vanishes behind me. Only the road and the rain remain.");
+    }
+    if (time > 9.4) this.advanceDeparture("engineReady");
+  }
+
   private updateFx(dt: number, t: number) {
     const active = this.isTouch || document.pointerLockElement === this.renderer.domElement;
     if (active) this.departureTime += dt;
     this.stairDoorOpen = THREE.MathUtils.damp(this.stairDoorOpen, this.hallOpen() ? 1 : 0, 4, dt);
     this.stairDoor.rotation.y = this.stairDoorOpen * 1.5;
     this.stairLight.intensity = (this.isTouch ? 2.4 : 4) * (Math.random() < 0.015 ? 0.25 : 1);
-    if (this.departure === "starting") this.car.wheels.forEach((w) => (w.rotation.x += 0));
-    if (this.departure === "starting" && this.engine) {
-      this.engine.frequency.setTargetAtTime(this.departureTime < 1.5 ? 24 + Math.sin(t * 32) * 7 : 52, this.sfx.ctx.currentTime, 0.1);
-      if (active) this.camera.position.y += Math.sin(t * 35) * 0.003;
-      if (this.departureTime > 4.5) this.advanceDeparture("engineReady");
-    }
+    this.updateDrive(t);
     const fl = this.lightning.update(dt);
     this.storm.intensity = fl * 4;
     this.view.color.setRGB(0.6 + fl * 0.8, 0.64 + fl * 0.8, 0.7 + fl * 0.9);
@@ -1033,6 +1195,7 @@ export class Apartment {
     window.removeEventListener("keyup", this.onKeyUp);
     window.removeEventListener("mousemove", this.onMouseMove);
     window.removeEventListener("resize", this.onResize);
+    window.removeEventListener("blur", this.onBlur);
     if (document.pointerLockElement) document.exitPointerLock();
     this.sfx.dispose();
     this.timer.dispose();

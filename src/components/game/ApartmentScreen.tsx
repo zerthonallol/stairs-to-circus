@@ -43,6 +43,7 @@ export function ApartmentScreen({ lang, onDone }: { lang: Lang; onDone: () => vo
           {hud.prompt && <div className={`absolute left-0 w-full text-center text-lg ${isTouch ? "bottom-40" : "bottom-28"}`}><span className="panel-glass rounded px-3 py-1">{isTouch ? "" : "[E] "}{hud.prompt}</span></div>}
           {hud.subtitle && <div className="absolute bottom-10 left-0 w-full px-6 text-center"><span className="cutscene-caption inline-block max-w-3xl rounded px-4 py-2 text-base md:text-lg">{hud.subtitle}</span></div>}
           {hud.paused && !isTouch && <div className="absolute inset-0 grid place-items-center bg-background/60 font-display text-2xl">{L("Кликните, чтобы продолжить", "Click to continue")}</div>}
+          <div className="absolute inset-0 bg-background" style={{ opacity: hud.fade }} />
         </div>
       )}
       {entered && hud && isTouch && (

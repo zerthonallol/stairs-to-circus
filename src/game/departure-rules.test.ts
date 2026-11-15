@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { departureNext, canBeginMainGame, nextFloor, LIFT_WORKS, START_FLOOR, type DepartureStage } from "./departure-rules";
+import { departureNext, canBeginMainGame, nextFloor, stairLap, LIFT_WORKS, START_FLOOR, STAIR_HEIGHT, type DepartureStage } from "./departure-rules";
 
 describe("departure before the main game", () => {
   it("leaving the apartment leads to the landing, not the main game", () => {
@@ -16,6 +16,12 @@ describe("departure before the main game", () => {
     expect(f).toBe(1);
     expect(nextFloor(1, -1)).toBe(1);
     expect(nextFloor(7, 1)).toBe(7);
+  });
+  it("wraps each storey without changing the apparent camera height", () => {
+    expect(stairLap(7, -1)).toEqual({ floor: 6, cameraYOffset: STAIR_HEIGHT });
+    expect(stairLap(6, 1)).toEqual({ floor: 7, cameraYOffset: -STAIR_HEIGHT });
+    expect(stairLap(1, -1)).toBeNull();
+    expect(stairLap(7, 1)).toBeNull();
   });
   it("requires reaching the street before entering the car", () => {
     expect(departureNext("ground", "enterCar")).toBe("ground");

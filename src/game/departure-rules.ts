@@ -4,6 +4,17 @@ export type DepartureAction = "leaveApartment" | "enterStairs" | "arrive" | "lea
 /** The lift is broken: the only way down from floor 7 is the stairs. */
 export const LIFT_WORKS = false;
 export const START_FLOOR = 7;
+export const STAIR_HEIGHT = 2.7;
+
+/**
+ * Crossing the lower landing wraps to the identical landing of the next storey.
+ * The camera offset exactly cancels that wrap, so the view never jumps.
+ */
+export function stairLap(floor: number, dir: -1 | 1) {
+  const next = nextFloor(floor, dir);
+  if (next === floor) return null;
+  return { floor: next, cameraYOffset: dir < 0 ? STAIR_HEIGHT : -STAIR_HEIGHT };
+}
 
 const steps: Partial<Record<DepartureStage, Partial<Record<DepartureAction, DepartureStage>>>> = {
   apartment: { leaveApartment: "landing" },
